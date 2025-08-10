@@ -11,6 +11,7 @@ let   GIST_ID = (process.env.GIST_ID || "").trim();
 const MAX_ITEMS_PER_FEED = parseInt(process.env.MAX_ITEMS_PER_FEED || "10", 10);
 const SEND_DELAY_MS = parseInt(process.env.SEND_DELAY_MS || "500", 10);
 const DEBUG = (process.env.DEBUG || "0") === "1";
+const SHOW_MATCHED = (process.env.SHOW_MATCHED || "1") === "1"; // 1 = írjuk ki a találatot
 
 const STATE_FILENAME = "state.json";
 const GITHUB_API = "https://api.github.com";
@@ -80,13 +81,14 @@ const extractTags = (entry, feedTitle) => {
   const hay = normalizeForMatch(
     [entry.title||"", entry.contentSnippet||entry.summary||"", entry.link||""].join(" ")
   );
-  KEYWORDS.forEach(k => { if (k && hay.includes(k)) { const t=makeHashtag(k); if(t) tags.add(t); }});
+  KEYWORDS.forEach(k => { if (k && hay.includes(k)) { const t=makeHashtag(KW_MAP.get(k) || k); if(t) tags.add(t); }});
   if (feedTitle) { const t=makeHashtag(feedTitle); if (t) tags.add(t); }
   const out = [...tags].filter(Boolean).slice(0,5);
   return out.length ? " " + out.join(" ") : "";
 };
 
-const buildHTMLMessage = (feedTitle, e) => {
+// --- Kiírjuk a talált kulcsszavakat is (🎯 Találat: ...) ---
+const buildHTMLMessage = (feedTitle, e, matchedOriginals = []) => {
   const title = e.title || "Új bejegyzés";
   const link = e.link || "";
   const source = hostFromUrl(link) || feedTitle;
@@ -98,10 +100,14 @@ const buildHTMLMessage = (feedTitle, e) => {
   const tags = extractTags(e, feedTitle);
   const head = `📰 <b>${escapeHtml(title)}</b>\n<i>${escapeHtml(source)}</i> • ${escapeHtml(when)}`;
   const body = sum ? `\n\n${escapeHtml(sum)}` : "";
+  const matchLine = (SHOW_MATCHED && matchedOriginals.length)
+    ? `\n\n🎯 <i>Találat:</i> ${escapeHtml(matchedOriginals.join(", "))}`
+    : "";
   const cta  = link ? `\n\n👉 <a href="${escapeHtml(link)}">Olvass tovább</a>` : "";
-  return head + body + cta + tags;
+  return head + body + matchLine + cta + tags;
 };
 
+// ---------- Keyword filtering (fájl + env fallback) ----------
 async function readListFile(path) {
   try {
     const raw = await fs.readFile(path, "utf8");
@@ -109,10 +115,12 @@ async function readListFile(path) {
   } catch { return []; }
 }
 
-let KEYWORDS = [];
+let RAW_KEYWORDS = [];   // eredeti formában megőrizzük a szép megjelenítéshez
+let KEYWORDS = [];       // normalizált (ékezet nélküli, lower)
 let EXCLUDE  = [];
+let KW_MAP   = new Map(); // normalizált -> eredeti
 
-function matchesKeywords(entry) {
+function getMatchInfo(entry) {
   const textRaw = [
     entry.title || "",
     entry.contentSnippet || entry.summary || "",
@@ -120,9 +128,17 @@ function matchesKeywords(entry) {
     entry.link || ""
   ].join(" ");
   const hay = normalizeForMatch(textRaw);
-  if (EXCLUDE.length && EXCLUDE.some(k => hay.includes(k))) return false;
-  if (KEYWORDS.length && !KEYWORDS.some(k => hay.includes(k))) return false;
-  return true;
+
+  let excludeHit = null;
+  for (const k of EXCLUDE) {
+    if (k && hay.includes(k)) { excludeHit = k; break; }
+  }
+
+  const matched = new Set();
+  for (const k of KEYWORDS) {
+    if (k && hay.includes(k)) matched.add(k);
+  }
+  return { excludeHit, matched };
 }
 
 // --- Link normalizálása deduplikációhoz (UTM, hash, stb. dobása) ---
@@ -188,13 +204,24 @@ async function main() {
   // kulcsszavak fájlból, env fallback
   const kwFromFile = await readListFile("keywords.txt");
   const exFromFile = await readListFile("exclude.txt");
-  KEYWORDS = (kwFromFile.length ? kwFromFile : (process.env.KEYWORDS || "").split(/[,\n]/))
-    .map(s => s.trim()).filter(Boolean).map(normalizeForMatch);
+
+  RAW_KEYWORDS = (kwFromFile.length ? kwFromFile : (process.env.KEYWORDS || "").split(/[,\n]/))
+    .map(s => s.trim()).filter(Boolean);
+
+  KEYWORDS = RAW_KEYWORDS.map(normalizeForMatch);
+  KW_MAP = new Map();
+  RAW_KEYWORDS.forEach(k => {
+    const n = normalizeForMatch(k);
+    if (n && !KW_MAP.has(n)) KW_MAP.set(n, k);
+  });
+
   EXCLUDE  = (exFromFile.length ? exFromFile : (process.env.EXCLUDE_KEYWORDS || "").split(/[,\n]/))
     .map(s => s.trim()).filter(Boolean).map(normalizeForMatch);
+
   if (DEBUG) {
-    console.log("DEBUG KEYWORDS:", KEYWORDS);
-    console.log("DEBUG EXCLUDE :", EXCLUDE);
+    console.log("DEBUG RAW_KEYWORDS:", RAW_KEYWORDS);
+    console.log("DEBUG KEYWORDS   :", KEYWORDS);
+    console.log("DEBUG EXCLUDE    :", EXCLUDE);
   }
 
   const state = await loadState();
@@ -214,15 +241,14 @@ async function main() {
         // ID- vagy LINK-alapú deduplikáció
         if (state.seen.has(id) || (nurl && state.seenLinks.has(nurl))) continue;
 
-        // kulcsszűrés
-        const textForWhy = normalizeForMatch([e.title||"", e.contentSnippet||e.summary||""].join(" "));
-        if (!matchesKeywords(e)) {
-          if (EXCLUDE.length && EXCLUDE.some(k => textForWhy.includes(k))) skippedByExclude++;
-          else if (KEYWORDS.length) skippedByKeywords++;
-          continue;
-        }
+        // kulcsszűrés + találatok kigyűjtése megjelenítéshez
+        const { excludeHit, matched } = getMatchInfo(e);
+        if (excludeHit) { skippedByExclude++; continue; }
+        if (KEYWORDS.length && matched.size === 0) { skippedByKeywords++; continue; }
 
-        const html = buildHTMLMessage(feedTitle, e);
+        const matchedOriginals = [...matched].map(n => KW_MAP.get(n) || n);
+
+        const html = buildHTMLMessage(feedTitle, e, matchedOriginals);
         const image = firstImageFromEntry(e);
 
         try {
