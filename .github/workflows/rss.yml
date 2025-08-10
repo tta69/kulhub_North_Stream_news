@@ -31,12 +31,22 @@ jobs:
         run: npm install --omit=dev --no-audit --no-fund
 
       - name: Run RSS script
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
-          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
-          GIST_ID: ${{ secrets.GIST_ID }}   # első futásnál lehet üres
-          MAX_ITEMS_PER_FEED: "10"
-          SEND_DELAY_MS: "500"
-          DEBUG: "0"                        # ha kell részletes log, állítsd 1-re
-        run: npm run rss:run
+        - name: Run RSS script
+  env:
+    TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+    TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+    GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+    GIST_ID: ${{ secrets.GIST_ID }}   # első futásnál lehet üres
+    MAX_ITEMS_PER_FEED: "10"
+    SEND_DELAY_MS: "500"
+    DEBUG: "0"                        # ideiglenesen állíthatod "1"-re
+
+    # --- Google News beállítások ---
+    GNEWS_FROM_KEYWORDS: "1"          # kulcsszavakból automatikus GNews feedek
+    GNEWS_HL: "hu"
+    GNEWS_GL: "HU"
+    GNEWS_CEID: "HU:hu"
+    GNEWS_WHEN: "3d"                  # opcionális: csak az elmúlt 3 nap
+    GNEWS_EXTRA: "-recipe -cooking"   # opcionális: extra kizárások/szűkítés
+  run: npm run rss:run
+
