@@ -25,35 +25,97 @@ const FETCH_OPTS = {
 // ---------- Helpers ----------
 const sha256 = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
 const canonicalId = (e) =>
-  sha256(e.id || e.guid || `${e.link || ""}|${e.title || ""}|${e.isoDate || e.pubDate || ""}`);
+  sha256(e.id || e.guid || `${e.link||""}|${e.title||""}|${e.isoDate||e.pubDate||""}`);
 
-const escapeMd = (t = "") => t.replace(/([_*[\]()~`>#+-=|{}.!])/g, "\\$1");
-const fmt = (feedTitle, e) => {
+const escapeHtml = (t="") =>
+  t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+
+const toHUDateTime = (d) => {
+  try {
+    const dt = new Date(d);
+    return dt.toLocaleString("hu-HU", {
+      timeZone: "Europe/Budapest",
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false
+    }).replace(/\./g,'.').replace(',','').trim();
+  } catch { return ""; }
+};
+
+const normalizeForMatch = (s="") =>
+  s.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu,"");
+
+const hostFromUrl = (u="") => {
+  try { return new URL(u).hostname.replace(/^www\./,""); }
+  catch { return ""; }
+};
+
+const firstImageFromEntry = (e) => {
+  // rss-parser: enclosure?.url (type startswith 'image')
+  if (e.enclosure?.url && (e.enclosure.type || "").startsWith("image")) return e.enclosure.url;
+  // media:content
+  if (Array.isArray(e.media?.content)) {
+    const m = e.media.content.find(m => (m.medium==="image") || (m.type||"").startsWith("image"));
+    if (m?.url) return m.url;
+  } else if (e.media?.content?.url && ((e.media.content.type||"").startsWith("image") || e.media.content.medium==="image")) {
+    return e.media.content.url;
+  }
+  // content:encoded-ben első <img> src
+  const html = e["content:encoded"] || e.content || "";
+  const m = html && html.match(/<img[^>]+src=["']([^"']+)["']/i);
+  return m ? m[1] : null;
+};
+
+const trimTo = (s, max) => (s.length <= max ? s : s.slice(0, max - 1) + "…");
+
+const makeHashtag = (s) => {
+  const base = normalizeForMatch(s).replace(/[^a-z0-9_]+/g,"");
+  if (!base) return null;
+  return "#"+trimTo(base, 30);
+};
+
+const extractTags = (entry, feedTitle) => {
+  const tags = new Set();
+  // domain
+  const host = hostFromUrl(entry.link || "");
+  if (host) tags.add(makeHashtag(host) || "");
+  // kategóriák
+  if (Array.isArray(entry.categories)) {
+    entry.categories.slice(0,4).forEach(c => { const t=makeHashtag(c); if(t) tags.add(t); });
+  }
+  // egyező kulcsszavak
+  const hay = normalizeForMatch(
+    [entry.title||"", entry.contentSnippet||entry.summary||"", entry.link||""].join(" ")
+  );
+  KEYWORDS.forEach(k => { if (k && hay.includes(k)) { const t=makeHashtag(k); if(t) tags.add(t); }});
+  // feed címe
+  if (feedTitle) { const t=makeHashtag(feedTitle); if (t) tags.add(t); }
+  // tisztítás
+  const out = [...tags].filter(Boolean).slice(0,5);
+  return out.length ? " " + out.join(" ") : "";
+};
+
+const buildHTMLMessage = (feedTitle, e) => {
   const title = e.title || "Új bejegyzés";
   const link = e.link || "";
-  let sum = (e.contentSnippet || e.summary || "").replace(/\s+/g, " ").trim();
-  if (sum.length > 300) sum = sum.slice(0, 297) + "...";
-  return sum
-    ? `📰 *${escapeMd(title)}*\n_${escapeMd(feedTitle)}_\n\n${escapeMd(sum)}\n\n${link}`
-    : `📰 *${escapeMd(title)}*\n_${escapeMd(feedTitle)}_\n\n${link}`;
-};
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const source = hostFromUrl(link) || feedTitle;
+  const when = toHUDateTime(e.isoDate || e.pubDate || Date.now());
 
+  let sum = (e.contentSnippet || e.summary || "").replace(/\s+/g," ").trim();
+  sum = trimTo(sum, 320);
+
+  const tags = extractTags(e, feedTitle);
+  const head = `📰 <b>${escapeHtml(title)}</b>\n<i>${escapeHtml(source)}</i> • ${escapeHtml(when)}`;
+  const body = sum ? `\n\n${escapeHtml(sum)}` : "";
+  const cta  = link ? `\n\n👉 <a href="${escapeHtml(link)}">Olvass tovább</a>` : "";
+  return head + body + cta + tags;
+};
+
+// ---------- Keyword filtering (fájl + env fallback) ----------
 async function readListFile(path) {
   try {
     const raw = await fs.readFile(path, "utf8");
-    return raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-function normalizeForMatch(s) {
-  // kisbetű + ékezetek eltávolítása (Node 20: Unicode property escapes OK)
-  return (s || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "");
+    return raw.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  } catch { return []; }
 }
 
 let KEYWORDS = [];
@@ -66,41 +128,28 @@ function matchesKeywords(entry) {
     Array.isArray(entry.categories) ? entry.categories.join(" ") : "",
     entry.link || ""
   ].join(" ");
-
   const hay = normalizeForMatch(textRaw);
-  if (EXCLUDE.length && EXCLUDE.some((k) => hay.includes(k))) return false;
-  if (KEYWORDS.length && !KEYWORDS.some((k) => hay.includes(k))) return false;
+  if (EXCLUDE.length && EXCLUDE.some(k => hay.includes(k))) return false;
+  if (KEYWORDS.length && !KEYWORDS.some(k => hay.includes(k))) return false;
   return true;
 }
 
+// ---------- Gist state ----------
 async function loadState() {
-  if (!GIST_ID) return { seen: new Set() };
+  if (!GIST_ID) return { seen:new Set() };
   const r = await fetch(`${GITHUB_API}/gists/${GIST_ID}`, FETCH_OPTS);
   if (!r.ok) throw new Error(`Gist GET failed: ${r.status} ${r.statusText}`);
   const data = await r.json();
   const file = data.files?.[STATE_FILENAME]?.content;
   return { seen: new Set(file ? JSON.parse(file).seen || [] : []) };
 }
-
 async function saveState(state) {
-  const files = {
-    [STATE_FILENAME]: {
-      content: JSON.stringify({ seen: [...state.seen].sort() }, null, 2)
-    }
-  };
+  const files = { [STATE_FILENAME]: { content: JSON.stringify({ seen:[...state.seen].sort() }, null, 2) } };
   if (GIST_ID) {
-    const r = await fetch(`${GITHUB_API}/gists/${GIST_ID}`, {
-      method: "PATCH",
-      ...FETCH_OPTS,
-      body: JSON.stringify({ files })
-    });
+    const r = await fetch(`${GITHUB_API}/gists/${GIST_ID}`, { method:"PATCH", ...FETCH_OPTS, body: JSON.stringify({ files }) });
     if (!r.ok) throw new Error(`Gist PATCH failed: ${r.status} ${r.statusText}`);
   } else {
-    const r = await fetch(`${GITHUB_API}/gists`, {
-      method: "POST",
-      ...FETCH_OPTS,
-      body: JSON.stringify({ files, description: "Telegram RSS bot state", public: false })
-    });
+    const r = await fetch(`${GITHUB_API}/gists`, { method:"POST", ...FETCH_OPTS, body: JSON.stringify({ files, description:"Telegram RSS bot state", public:false }) });
     if (!r.ok) throw new Error(`Gist POST failed: ${r.status} ${r.statusText}`);
     const created = await r.json();
     GIST_ID = created.id;
@@ -108,9 +157,13 @@ async function saveState(state) {
   }
 }
 
-async function readFeedsList(path = "feeds.txt") {
+// ---------- Feeds ----------
+async function readFeedsList(path="feeds.txt") {
   const raw = await fs.readFile(path, "utf8");
-  return raw.split("\n").map((s) => s.trim()).filter((s) => s && !s.startsWith("#"));
+  return raw
+    .split("\n")
+    .map(s => s.split("#")[0].trim()) // inline komment támogatás
+    .filter(s => s);
 }
 
 // ---------- Main ----------
@@ -119,34 +172,24 @@ async function main() {
     throw new Error("Hiányzó env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GIST_TOKEN kötelező.");
   }
 
-  const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
+  const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling:false });
   const parser = new Parser({ timeout: 20000 });
 
-  // Kulcsszavak betöltése fájlból, fallback env-re
+  // kulcsszavak fájlból, env fallback
   const kwFromFile = await readListFile("keywords.txt");
   const exFromFile = await readListFile("exclude.txt");
-
   KEYWORDS = (kwFromFile.length ? kwFromFile : (process.env.KEYWORDS || "").split(/[,\n]/))
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map(normalizeForMatch);
-
-  EXCLUDE = (exFromFile.length ? exFromFile : (process.env.EXCLUDE_KEYWORDS || "").split(/[,\n]/))
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map(normalizeForMatch);
-
+    .map(s => s.trim()).filter(Boolean).map(normalizeForMatch);
+  EXCLUDE  = (exFromFile.length ? exFromFile : (process.env.EXCLUDE_KEYWORDS || "").split(/[,\n]/))
+    .map(s => s.trim()).filter(Boolean).map(normalizeForMatch);
   if (DEBUG) {
-    console.log("DEBUG: KEYWORDS =", KEYWORDS);
-    console.log("DEBUG: EXCLUDE  =", EXCLUDE);
+    console.log("DEBUG KEYWORDS:", KEYWORDS);
+    console.log("DEBUG EXCLUDE :", EXCLUDE);
   }
 
   const state = await loadState();
   const feeds = await readFeedsList();
-
-  let sent = 0;
-  let skippedByExclude = 0;
-  let skippedByKeywords = 0;
+  let sent = 0, skippedByExclude = 0, skippedByKeywords = 0;
 
   for (const url of feeds) {
     try {
@@ -158,23 +201,25 @@ async function main() {
         const id = canonicalId(e);
         if (state.seen.has(id)) continue;
 
-        const before = sent + skippedByExclude + skippedByKeywords;
-
+        // kulcsszűrés
+        const textForWhy = normalizeForMatch([e.title||"", e.contentSnippet||e.summary||""].join(" "));
         if (!matchesKeywords(e)) {
-          // durva ok megállapítás (csak debug stathoz)
-          const text = normalizeForMatch(
-            [e.title || "", e.contentSnippet || e.summary || ""].join(" ")
-          );
-          if (EXCLUDE.length && EXCLUDE.some((k) => text.includes(k))) skippedByExclude++;
+          if (EXCLUDE.length && EXCLUDE.some(k => textForWhy.includes(k))) skippedByExclude++;
           else if (KEYWORDS.length) skippedByKeywords++;
           continue;
         }
 
+        const html = buildHTMLMessage(feedTitle, e);
+        const image = firstImageFromEntry(e);
+
         try {
-          await bot.sendMessage(TELEGRAM_CHANNEL_ID, fmt(feedTitle, e), {
-            parse_mode: "Markdown",
-            disable_web_page_preview: false
-          });
+          if (image) {
+            // caption max 1024
+            const caption = trimTo(html, 1024);
+            await bot.sendPhoto(TELEGRAM_CHANNEL_ID, image, { caption, parse_mode: "HTML" });
+          } else {
+            await bot.sendMessage(TELEGRAM_CHANNEL_ID, html, { parse_mode: "HTML", disable_web_page_preview: false });
+          }
           state.seen.add(id);
           sent++;
           await sleep(SEND_DELAY_MS);
@@ -192,7 +237,4 @@ async function main() {
   if (!process.env.GIST_ID && GIST_ID) console.log(`GIST_ID=${GIST_ID}`);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+main().catch(e => { console.error(e); process.exit(1); });
