@@ -20,7 +20,6 @@ európai parlament
 europian commitee
 európai bizottság
 macron
-france
 franciaország
 orban viktos
 viktor orban
@@ -31,3 +30,4 @@ zelensky
 Европейский союз
 Соединенные Штаты Америки
 США
+НАТО
