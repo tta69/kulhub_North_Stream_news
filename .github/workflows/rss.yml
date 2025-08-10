@@ -1,8 +1,10 @@
 name: Telegram RSS (Node)
 
 on:
+  push:
+    branches: [ main ]   # push-ra is tesztel
   schedule:
-    - cron: "*/10 * * * *"    # 10 percenként (figyelj: csillag-per-10)
+    - cron: "*/10 * * * *"   # 10 percenként
   workflow_dispatch: {}
 
 jobs:
@@ -19,7 +21,13 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install deps
+      # Ha van lockfile, ci-t használunk, különben install
+      - name: Install deps (ci)
+        if: ${{ hashFiles('package-lock.json') != '' }}
+        run: npm ci --omit=dev --no-audit --no-fund
+
+      - name: Install deps (no lockfile)
+        if: ${{ hashFiles('package-lock.json') == '' }}
         run: npm install --omit=dev --no-audit --no-fund
 
       - name: Run RSS script
@@ -27,7 +35,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
-          GIST_ID: ${{ secrets.GIST_ID }}   # üresen is ok az első futásnál
+          GIST_ID: ${{ secrets.GIST_ID }}   # első futásnál lehet üres
           MAX_ITEMS_PER_FEED: "10"
           SEND_DELAY_MS: "500"
+          DEBUG: "0"                        # ha kell részletes log, állítsd 1-re
         run: npm run rss:run
