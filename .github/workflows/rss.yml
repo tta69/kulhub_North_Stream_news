@@ -48,3 +48,8 @@ jobs:
           GNEWS_CEID: "HU:hu"
           GNEWS_WHEN: "1h"          # utolsó 1 óra
           GNEWS_EXTRA: "-sport -sports -football -soccer -recept -recipe -cooking -food -gasztronomia -konyha -kultura -kultúra -culture -film -mozi -music -zene -koncert -festival -szinhaz -theatre -art -entertainment -celebrity -celeb" # opcionális: extra kizárások/szűkítés
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SUMMARY_ENABLED: "1"
+          SUMMARY_MODEL: "gpt-4o-mini"
+          SUMMARY_LANG: "hu"
+          SUMMARY_MAX_PER_RUN: "999999"  # most korlátlanra hagyjuk
