@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]   # push-ra is tesztel
   schedule:
-    - cron: "*/3 * * * *"   # 3 percenként
+    - cron: "*/5 * * * *"   # 5 percenként
   workflow_dispatch: {}
 
 jobs:
