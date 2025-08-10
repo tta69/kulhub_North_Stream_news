@@ -21,6 +21,33 @@ const FETCH_OPTS = {
   }
 };
 
+// --- kulcsszavas segédek (ÚJ) ---
+async function readListFile(path) {
+  try {
+    const raw = await fs.readFile(path, "utf8");
+    return raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+let KEYWORDS = []; // soronként egy kifejezés a keywords.txt-ből
+let EXCLUDE  = []; // soronként egy kifejezés az exclude.txt-ből
+
+function matchesKeywords(entry) {
+  const text = [
+    entry.title || "",
+    entry.contentSnippet || entry.summary || "",
+    Array.isArray(entry.categories) ? entry.categories.join(" ") : "",
+    entry.link || ""
+  ].join(" ").toLowerCase();
+
+  if (EXCLUDE.length && EXCLUDE.some(k => text.includes(k))) return false;
+  if (KEYWORDS.length && !KEYWORDS.some(k => text.includes(k))) return false;
+  return true; // ha nincs megadva semmi, minden átmegy
+}
+
+// --- utilok ---
 const sha256 = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
 const canonicalId = (e) => sha256(e.id || e.guid || `${e.link||""}|${e.title||""}|${e.isoDate||e.pubDate||""}`);
 const escapeMd = (t="") => t.replace(/([_*[\]()~`>#+-=|{}.!])/g, "\\$1");
@@ -65,8 +92,22 @@ async function main() {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHANNEL_ID || !GIST_TOKEN) {
     throw new Error("Hiányzó env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GIST_TOKEN kötelező.");
   }
+
   const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling:false });
   const parser = new Parser({ timeout: 20000 });
+
+  // --- kulcsszavak betöltése fájlból, fallback env-re (ÚJ) ---
+  KEYWORDS = await readListFile("keywords.txt");
+  EXCLUDE  = await readListFile("exclude.txt");
+  if (KEYWORDS.length === 0) {
+    KEYWORDS = (process.env.KEYWORDS || "").split(/[,\n]/).map(s=>s.trim()).filter(Boolean);
+  }
+  if (EXCLUDE.length === 0) {
+    EXCLUDE = (process.env.EXCLUDE_KEYWORDS || "").split(/[,\n]/).map(s=>s.trim()).filter(Boolean);
+  }
+  KEYWORDS = KEYWORDS.map(s => s.toLowerCase());
+  EXCLUDE  = EXCLUDE.map(s => s.toLowerCase());
+
   const state = await loadState();
   const feeds = await readFeedsList();
   let sent = 0;
@@ -79,6 +120,10 @@ async function main() {
       for (const e of [...items].reverse()) {
         const id = canonicalId(e);
         if (state.seen.has(id)) continue;
+
+        // --- kulcsszűrés (ÚJ) ---
+        if (!matchesKeywords(e)) continue;
+
         try {
           await bot.sendMessage(TELEGRAM_CHANNEL_ID, fmt(feedTitle, e), { parse_mode:"Markdown", disable_web_page_preview:false });
           state.seen.add(id);
