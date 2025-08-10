@@ -47,4 +47,4 @@ jobs:
           GNEWS_GL: "HU"
           GNEWS_CEID: "HU:hu"
           GNEWS_WHEN: "3d"                  # opcionális: csak az elmúlt 3 nap
-          GNEWS_EXTRA: "-recipe -cooking"   # opcionális: extra kizárások/szűkítés
+          GNEWS_EXTRA: "-sport -sports -football -soccer -recept -recipe -cooking -food -gasztronomia -konyha -kultura -kultúra -culture -film -mozi -music -zene -koncert -festival -szinhaz -theatre -art -entertainment -celebrity -celeb" # opcionális: extra kizárások/szűkítés
