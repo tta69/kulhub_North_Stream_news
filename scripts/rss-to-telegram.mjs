@@ -1,8 +1,12 @@
+// scripts/rss-to-telegram.mjs
+
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import Parser from "rss-parser";
 import TelegramBot from "node-telegram-bot-api";
+import OpenAI from "openai";
 
+// === Alap env-k ===
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID;
 const GIST_TOKEN = process.env.GIST_TOKEN;
@@ -11,16 +15,27 @@ let   GIST_ID = (process.env.GIST_ID || "").trim();
 const MAX_ITEMS_PER_FEED = parseInt(process.env.MAX_ITEMS_PER_FEED || "10", 10);
 const SEND_DELAY_MS = parseInt(process.env.SEND_DELAY_MS || "500", 10);
 const DEBUG = (process.env.DEBUG || "0") === "1";
-const SHOW_MATCHED = (process.env.SHOW_MATCHED || "1") === "1"; // 1 = írjuk ki a találatot
+const SHOW_MATCHED = (process.env.SHOW_MATCHED || "1") === "1"; // 1 = "Találat:" sor
 
-// --- Google News RSS integráció (ALAPBÓL BEKAPCS) ---
-const GNEWS_FROM_KEYWORDS = (process.env.GNEWS_FROM_KEYWORDS || "1") === "1"; // 1 = kulcsszavakból generál GNews feedeket
-const GNEWS_HL   = process.env.GNEWS_HL   || "hu";   // felület nyelve
-const GNEWS_GL   = process.env.GNEWS_GL   || "HU";   // régió
-const GNEWS_CEID = process.env.GNEWS_CEID || "HU:hu";// ország:nyelv
-const GNEWS_WHEN = process.env.GNEWS_WHEN || "";     // pl. "1d", "3d", "7d" (opcionális)
-const GNEWS_EXTRA = process.env.GNEWS_EXTRA || "";   // pl. 'site:reuters.com OR site:bbc.com -recipe'
+// === Google News integráció ===
+const GNEWS_FROM_KEYWORDS = (process.env.GNEWS_FROM_KEYWORDS || "1") === "1";
+const GNEWS_HL   = process.env.GNEWS_HL   || "hu";
+const GNEWS_GL   = process.env.GNEWS_GL   || "HU";
+const GNEWS_CEID = process.env.GNEWS_CEID || "HU:hu";
+const GNEWS_WHEN = process.env.GNEWS_WHEN || "";   // pl. "1h", "3d"
+const GNEWS_EXTRA = process.env.GNEWS_EXTRA || ""; // pl. "-recipe -sport"
 
+// === AI összefoglaló ===
+const SUMMARY_ENABLED = (process.env.SUMMARY_ENABLED || "1") === "1";
+const SUMMARY_MODEL = process.env.SUMMARY_MODEL || "gpt-4o-mini";
+const SUMMARY_LANG = (process.env.SUMMARY_LANG || "hu").toLowerCase(); // "hu" | "en" | "auto"
+const SUMMARY_MAX_PER_RUN = parseInt(process.env.SUMMARY_MAX_PER_RUN || "30", 10);
+
+const openai = SUMMARY_ENABLED && process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  : null;
+
+// === Állapot (Gist) ===
 const STATE_FILENAME = "state.json";
 const GITHUB_API = "https://api.github.com";
 const FETCH_OPTS = {
@@ -31,7 +46,9 @@ const FETCH_OPTS = {
   }
 };
 
-// ---------- Helpers ----------
+// ---------- Közös segédek ----------
+const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
+
 const sha256 = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
 const canonicalId = (e) =>
   sha256(e.id || e.guid || `${e.link||""}|${e.title||""}|${e.isoDate||e.pubDate||""}`);
@@ -95,7 +112,8 @@ const extractTags = (entry, feedTitle) => {
   return out.length ? " " + out.join(" ") : "";
 };
 
-const buildHTMLMessage = (feedTitle, e, matchedOriginals = []) => {
+// HTML üzenet (opcionális AI-summarival)
+const buildHTMLMessage = (feedTitle, e, matchedOriginals = [], summaryText = "") => {
   const title = e.title || "Új bejegyzés";
   const link = e.link || "";
   const source = hostFromUrl(link) || feedTitle;
@@ -106,15 +124,16 @@ const buildHTMLMessage = (feedTitle, e, matchedOriginals = []) => {
 
   const tags = extractTags(e, feedTitle);
   const head = `📰 <b>${escapeHtml(title)}</b>\n<i>${escapeHtml(source)}</i> • ${escapeHtml(when)}`;
+  const ai   = summaryText ? `\n\n<b>Összefoglaló</b>: ${escapeHtml(summaryText)}` : "";
   const body = sum ? `\n\n${escapeHtml(sum)}` : "";
   const matchLine = (SHOW_MATCHED && matchedOriginals.length)
     ? `\n\n🎯 <i>Találat:</i> ${escapeHtml(matchedOriginals.join(", "))}`
     : "";
   const cta  = link ? `\n\n👉 <a href="${escapeHtml(link)}">Olvass tovább</a>` : "";
-  return head + body + matchLine + cta + tags;
+  return head + ai + body + matchLine + cta + tags;
 };
 
-// --- kulcsszavak/tiltások fájlokból + env fallback ---
+// kulcsszavak/tiltások fájlokból + env fallback
 async function readListFile(path) {
   try {
     const raw = await fs.readFile(path, "utf8");
@@ -122,7 +141,7 @@ async function readListFile(path) {
   } catch { return []; }
 }
 
-let RAW_KEYWORDS = [];   // eredeti megjelenítéshez (idézőjelek megmaradnak)
+let RAW_KEYWORDS = [];   // eredeti forma (idézőjelek maradnak)
 let KEYWORDS = [];       // normalizált (ékezet nélkül, lower)
 let EXCLUDE  = [];
 let KW_MAP   = new Map(); // normalizált -> eredeti
@@ -148,7 +167,7 @@ function getMatchInfo(entry) {
   return { excludeHit, matched };
 }
 
-// --- Link és cím deduplikáció ---
+// Link + cím deduplikáció
 function normalizeUrl(u = "") {
   try {
     const url = new URL(u);
@@ -177,7 +196,7 @@ function titleSignature(title = "") {
   return sha256(tokens.join(" "));
 }
 
-// ---------- Gist state ----------
+// === Gist state ===
 async function loadState() {
   if (!GIST_ID) return { seen:new Set(), seenLinks:new Set(), seenTitles:new Set() };
   const r = await fetch(`${GITHUB_API}/gists/${GIST_ID}`, FETCH_OPTS);
@@ -210,16 +229,16 @@ async function saveState(state) {
   }
 }
 
-// ---------- Feeds ----------
+// === Feeds ===
 async function readFeedsList(path="feeds.txt") {
   const raw = await fs.readFile(path, "utf8");
   return raw
     .split("\n")
-    .map(s => s.split("#")[0].trim()) // inline komment támogatás
+    .map(s => s.split("#")[0].trim()) // inline komment
     .filter(s => s);
 }
 
-// --- Google News helpers ---
+// Google News helpers
 function isGnewsUrl(u="") {
   return /^https?:\/\/news\.google\.com\/rss\/search/i.test(u);
 }
@@ -231,10 +250,51 @@ function buildGnewsFeedsForKeywords(rawKeywords) {
   return rawKeywords.map(k => {
     const parts = [k.trim()];
     if (GNEWS_EXTRA.trim()) parts.push(GNEWS_EXTRA.trim());
-    if (GNEWS_WHEN.trim())  parts.push(`when:${GNEWS_WHEN.trim()}`); // pl. when:3d
+    if (GNEWS_WHEN.trim())  parts.push(`when:${GNEWS_WHEN.trim()}`);
     const q = parts.filter(Boolean).join(" ");
     return gnewsUrl(q);
   });
+}
+
+// === AI összefoglaló készítése ===
+async function generateSummary(entry, feedTitle) {
+  if (!openai) return "";
+
+  const title = (entry.title || "").trim();
+  const host  = hostFromUrl(entry.link || "") || (feedTitle || "").trim();
+  const snippet = (entry.contentSnippet || entry.summary || "")
+    .replace(/\s+/g," ")
+    .trim()
+    .slice(0, 1000);
+
+  const lang = ["hu","en","auto"].includes(SUMMARY_LANG) ? SUMMARY_LANG : "hu";
+  const instruction =
+    lang === "auto"
+      ? "Write a neutral, 2–4 sentence news brief in the article's language. No clickbait, no emojis."
+      : `Írj ${lang === "hu" ? "magyar" : "angol"} nyelven 2–4 mondatos, tényszerű hírösszefoglalót. Ne használj clickbaitet vagy emojikat.`;
+
+  const input = [
+    instruction,
+    `Cím/Title: ${title}`,
+    `Forrás/Source: ${host}`,
+    `Kivonat/Excerpt: ${snippet || "(csak cím áll rendelkezésre)"}`,
+  ].join("\n");
+
+  try {
+    const resp = await openai.responses.create({
+      model: SUMMARY_MODEL,
+      input
+    });
+    // kompatibilis kinyerés
+    const txt = (resp.output_text ||
+      resp?.content?.[0]?.text ||
+      resp?.choices?.[0]?.message?.content ||
+      "").toString().trim();
+    return txt;
+  } catch (err) {
+    console.warn("[WARN] AI összefoglaló hiba:", err?.message || err);
+    return "";
+  }
 }
 
 // ---------- Main ----------
@@ -246,7 +306,7 @@ async function main() {
   const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling:false });
   const parser = new Parser({ timeout: 20000 });
 
-  // kulcsszavak fájlból, env fallback
+  // kulcsszavak / exclude
   const kwFromFile = await readListFile("keywords.txt");
   const exFromFile = await readListFile("exclude.txt");
 
@@ -263,9 +323,9 @@ async function main() {
   EXCLUDE  = (exFromFile.length ? exFromFile : (process.env.EXCLUDE_KEYWORDS || "").split(/[,\n]/))
     .map(s => s.trim()).filter(Boolean).map(normalizeForMatch);
 
-  // --- feedlista összeállítás: ELŐBB GNews, aztán a base feedek
+  // feedlista: előbb GNews, aztán base feedek
   let baseFeeds = await readFeedsList();
-  baseFeeds = baseFeeds.filter(u => !isGnewsUrl(u)); // ha véletlen bent maradt volna
+  baseFeeds = baseFeeds.filter(u => !isGnewsUrl(u));
 
   let gnewsFeeds = [];
   if (GNEWS_FROM_KEYWORDS && RAW_KEYWORDS.length) {
@@ -300,14 +360,24 @@ async function main() {
           continue;
         }
 
-        // kulcsszűrés + találatok a megjelenítéshez
+        // kulcsszűrés
         const { excludeHit, matched } = getMatchInfo(e);
         if (excludeHit) { skippedByExclude++; continue; }
         if (KEYWORDS.length && matched.size === 0) { skippedByKeywords++; continue; }
 
         const matchedOriginals = [...matched].map(n => KW_MAP.get(n) || n);
 
-        const html = buildHTMLMessage(feedTitle, e, matchedOriginals);
+        // AI összefoglaló (futásonkénti limit)
+        let summaryText = "";
+        if (SUMMARY_ENABLED && SUMMARY_MAX_PER_RUN > 0) {
+          globalThis.__summaryCount = (globalThis.__summaryCount || 0);
+          if (globalThis.__summaryCount < SUMMARY_MAX_PER_RUN) {
+            summaryText = await generateSummary(e, feedTitle);
+            globalThis.__summaryCount++;
+          }
+        }
+
+        const html = buildHTMLMessage(feedTitle, e, matchedOriginals, summaryText);
         const image = firstImageFromEntry(e);
 
         try {
