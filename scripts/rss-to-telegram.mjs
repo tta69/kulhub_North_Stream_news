@@ -13,6 +13,14 @@ const SEND_DELAY_MS = parseInt(process.env.SEND_DELAY_MS || "500", 10);
 const DEBUG = (process.env.DEBUG || "0") === "1";
 const SHOW_MATCHED = (process.env.SHOW_MATCHED || "1") === "1"; // 1 = írjuk ki a találatot
 
+// --- Google News RSS integráció (ALAPBÓL BEKAPCS) ---
+const GNEWS_FROM_KEYWORDS = (process.env.GNEWS_FROM_KEYWORDS || "1") === "1"; // 1 = kulcsszavakból generál GNews feedeket
+const GNEWS_HL   = process.env.GNEWS_HL   || "hu";   // felület nyelve
+const GNEWS_GL   = process.env.GNEWS_GL   || "HU";   // régió
+const GNEWS_CEID = process.env.GNEWS_CEID || "HU:hu";// ország:nyelv
+const GNEWS_WHEN = process.env.GNEWS_WHEN || "";     // pl. "1d", "3d", "7d" (opcionális)
+const GNEWS_EXTRA = process.env.GNEWS_EXTRA || "";   // pl. 'site:reuters.com OR site:bbc.com -recipe'
+
 const STATE_FILENAME = "state.json";
 const GITHUB_API = "https://api.github.com";
 const FETCH_OPTS = {
@@ -87,7 +95,6 @@ const extractTags = (entry, feedTitle) => {
   return out.length ? " " + out.join(" ") : "";
 };
 
-// --- Kiírjuk a talált kulcsszavakat is (🎯 Találat: ...) ---
 const buildHTMLMessage = (feedTitle, e, matchedOriginals = []) => {
   const title = e.title || "Új bejegyzés";
   const link = e.link || "";
@@ -107,7 +114,7 @@ const buildHTMLMessage = (feedTitle, e, matchedOriginals = []) => {
   return head + body + matchLine + cta + tags;
 };
 
-// ---------- Keyword filtering (fájl + env fallback) ----------
+// --- kulcsszavak/tiltások fájlokból + env fallback ---
 async function readListFile(path) {
   try {
     const raw = await fs.readFile(path, "utf8");
@@ -115,8 +122,8 @@ async function readListFile(path) {
   } catch { return []; }
 }
 
-let RAW_KEYWORDS = [];   // eredeti formában megőrizzük a szép megjelenítéshez
-let KEYWORDS = [];       // normalizált (ékezet nélküli, lower)
+let RAW_KEYWORDS = [];   // eredeti megjelenítéshez (idézőjelek megmaradnak)
+let KEYWORDS = [];       // normalizált (ékezet nélkül, lower)
 let EXCLUDE  = [];
 let KW_MAP   = new Map(); // normalizált -> eredeti
 
@@ -141,7 +148,7 @@ function getMatchInfo(entry) {
   return { excludeHit, matched };
 }
 
-// --- Link normalizálása deduplikációhoz (UTM, hash, stb. dobása) ---
+// --- Link és cím deduplikáció ---
 function normalizeUrl(u = "") {
   try {
     const url = new URL(u);
@@ -152,24 +159,44 @@ function normalizeUrl(u = "") {
   } catch { return ""; }
 }
 
+const STOP = new Set([
+  "a","az","és","vagy","hogy","egy","mint","mert","szerint",
+  "the","and","or","in","on","at","of","to","for","as","is","are","was","were",
+  "after","before","with","by","from","this","that","say","says"
+]);
+
+function titleSignature(title = "") {
+  const norm = normalizeForMatch(title)
+    .replace(/[^a-z0-9\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const tokens = norm.split(" ")
+    .filter(t => t && t.length > 2 && !STOP.has(t))
+    .slice(0, 12)
+    .sort();
+  return sha256(tokens.join(" "));
+}
+
 // ---------- Gist state ----------
 async function loadState() {
-  if (!GIST_ID) return { seen:new Set(), seenLinks:new Set() };
+  if (!GIST_ID) return { seen:new Set(), seenLinks:new Set(), seenTitles:new Set() };
   const r = await fetch(`${GITHUB_API}/gists/${GIST_ID}`, FETCH_OPTS);
   if (!r.ok) throw new Error(`Gist GET failed: ${r.status} ${r.statusText}`);
   const data = await r.json();
   const file = data.files?.[STATE_FILENAME]?.content;
-  if (!file) return { seen:new Set(), seenLinks:new Set() };
+  if (!file) return { seen:new Set(), seenLinks:new Set(), seenTitles:new Set() };
   const parsed = JSON.parse(file);
   return {
-    seen: new Set(parsed.seen || []),
-    seenLinks: new Set(parsed.seen_links || [])
+    seen:       new Set(parsed.seen || []),
+    seenLinks:  new Set(parsed.seen_links || []),
+    seenTitles: new Set(parsed.seen_titles || [])
   };
 }
 async function saveState(state) {
   const files = { [STATE_FILENAME]: { content: JSON.stringify({
-    seen: [...state.seen].sort(),
-    seen_links: [...state.seenLinks].sort()
+    seen:        [...state.seen].sort(),
+    seen_links:  [...state.seenLinks].sort(),
+    seen_titles: [...state.seenTitles].sort()
   }, null, 2) } };
   if (GIST_ID) {
     const r = await fetch(`${GITHUB_API}/gists/${GIST_ID}`, { method:"PATCH", ...FETCH_OPTS, body: JSON.stringify({ files }) });
@@ -190,6 +217,24 @@ async function readFeedsList(path="feeds.txt") {
     .split("\n")
     .map(s => s.split("#")[0].trim()) // inline komment támogatás
     .filter(s => s);
+}
+
+// --- Google News helpers ---
+function isGnewsUrl(u="") {
+  return /^https?:\/\/news\.google\.com\/rss\/search/i.test(u);
+}
+function gnewsUrl(q, {hl=GNEWS_HL, gl=GNEWS_GL, ceid=GNEWS_CEID} = {}) {
+  const params = new URLSearchParams({ q, hl, gl, ceid });
+  return `https://news.google.com/rss/search?${params.toString()}`;
+}
+function buildGnewsFeedsForKeywords(rawKeywords) {
+  return rawKeywords.map(k => {
+    const parts = [k.trim()];
+    if (GNEWS_EXTRA.trim()) parts.push(GNEWS_EXTRA.trim());
+    if (GNEWS_WHEN.trim())  parts.push(`when:${GNEWS_WHEN.trim()}`); // pl. when:3d
+    const q = parts.filter(Boolean).join(" ");
+    return gnewsUrl(q);
+  });
 }
 
 // ---------- Main ----------
@@ -218,14 +263,23 @@ async function main() {
   EXCLUDE  = (exFromFile.length ? exFromFile : (process.env.EXCLUDE_KEYWORDS || "").split(/[,\n]/))
     .map(s => s.trim()).filter(Boolean).map(normalizeForMatch);
 
+  // --- feedlista összeállítás: ELŐBB GNews, aztán a base feedek
+  let baseFeeds = await readFeedsList();
+  baseFeeds = baseFeeds.filter(u => !isGnewsUrl(u)); // ha véletlen bent maradt volna
+
+  let gnewsFeeds = [];
+  if (GNEWS_FROM_KEYWORDS && RAW_KEYWORDS.length) {
+    gnewsFeeds = buildGnewsFeedsForKeywords(RAW_KEYWORDS);
+  }
+
+  const feeds = [...gnewsFeeds, ...baseFeeds];
+
   if (DEBUG) {
-    console.log("DEBUG RAW_KEYWORDS:", RAW_KEYWORDS);
-    console.log("DEBUG KEYWORDS   :", KEYWORDS);
-    console.log("DEBUG EXCLUDE    :", EXCLUDE);
+    console.log(`DEBUG: GNews feeds: ${gnewsFeeds.length}, base feeds: ${baseFeeds.length}, total: ${feeds.length}`);
+    // console.log(feeds);
   }
 
   const state = await loadState();
-  const feeds = await readFeedsList();
   let sent = 0, skippedByExclude = 0, skippedByKeywords = 0;
 
   for (const url of feeds) {
@@ -235,13 +289,18 @@ async function main() {
       const items = (feed.items || []).slice(0, MAX_ITEMS_PER_FEED);
 
       for (const e of [...items].reverse()) {
-        const id = canonicalId(e);
+        const id   = canonicalId(e);
         const nurl = normalizeUrl(e.link || "");
+        const tsig = titleSignature(e.title || "");
 
-        // ID- vagy LINK-alapú deduplikáció
-        if (state.seen.has(id) || (nurl && state.seenLinks.has(nurl))) continue;
+        // duplikációk
+        if (state.seen.has(id) ||
+            (nurl && state.seenLinks.has(nurl)) ||
+            (tsig && state.seenTitles.has(tsig))) {
+          continue;
+        }
 
-        // kulcsszűrés + találatok kigyűjtése megjelenítéshez
+        // kulcsszűrés + találatok a megjelenítéshez
         const { excludeHit, matched } = getMatchInfo(e);
         if (excludeHit) { skippedByExclude++; continue; }
         if (KEYWORDS.length && matched.size === 0) { skippedByKeywords++; continue; }
@@ -260,6 +319,7 @@ async function main() {
           }
           state.seen.add(id);
           if (nurl) state.seenLinks.add(nurl);
+          if (tsig) state.seenTitles.add(tsig);
           sent++;
           await sleep(SEND_DELAY_MS);
         } catch (err) {
