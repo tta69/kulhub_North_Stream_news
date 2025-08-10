@@ -50,16 +50,13 @@ const hostFromUrl = (u="") => {
 };
 
 const firstImageFromEntry = (e) => {
-  // rss-parser: enclosure?.url (type startswith 'image')
   if (e.enclosure?.url && (e.enclosure.type || "").startsWith("image")) return e.enclosure.url;
-  // media:content
   if (Array.isArray(e.media?.content)) {
     const m = e.media.content.find(m => (m.medium==="image") || (m.type||"").startsWith("image"));
     if (m?.url) return m.url;
   } else if (e.media?.content?.url && ((e.media.content.type||"").startsWith("image") || e.media.content.medium==="image")) {
     return e.media.content.url;
   }
-  // content:encoded-ben első <img> src
   const html = e["content:encoded"] || e.content || "";
   const m = html && html.match(/<img[^>]+src=["']([^"']+)["']/i);
   return m ? m[1] : null;
@@ -75,21 +72,16 @@ const makeHashtag = (s) => {
 
 const extractTags = (entry, feedTitle) => {
   const tags = new Set();
-  // domain
   const host = hostFromUrl(entry.link || "");
   if (host) tags.add(makeHashtag(host) || "");
-  // kategóriák
   if (Array.isArray(entry.categories)) {
     entry.categories.slice(0,4).forEach(c => { const t=makeHashtag(c); if(t) tags.add(t); });
   }
-  // egyező kulcsszavak
   const hay = normalizeForMatch(
     [entry.title||"", entry.contentSnippet||entry.summary||"", entry.link||""].join(" ")
   );
   KEYWORDS.forEach(k => { if (k && hay.includes(k)) { const t=makeHashtag(k); if(t) tags.add(t); }});
-  // feed címe
   if (feedTitle) { const t=makeHashtag(feedTitle); if (t) tags.add(t); }
-  // tisztítás
   const out = [...tags].filter(Boolean).slice(0,5);
   return out.length ? " " + out.join(" ") : "";
 };
@@ -110,7 +102,6 @@ const buildHTMLMessage = (feedTitle, e) => {
   return head + body + cta + tags;
 };
 
-// ---------- Keyword filtering (fájl + env fallback) ----------
 async function readListFile(path) {
   try {
     const raw = await fs.readFile(path, "utf8");
@@ -134,17 +125,36 @@ function matchesKeywords(entry) {
   return true;
 }
 
+// --- Link normalizálása deduplikációhoz (UTM, hash, stb. dobása) ---
+function normalizeUrl(u = "") {
+  try {
+    const url = new URL(u);
+    url.hash = "";
+    const drop = new Set(["utm_source","utm_medium","utm_campaign","utm_term","utm_content","utm_id","gclid","fbclid","mc_cid","mc_eid","ref"]);
+    [...url.searchParams.keys()].forEach(k => { if (drop.has(k.toLowerCase())) url.searchParams.delete(k); });
+    return `${url.protocol}//${url.hostname.toLowerCase()}${url.pathname.replace(/\/+$/,"")}${url.search ? `?${url.searchParams.toString()}` : ""}`;
+  } catch { return ""; }
+}
+
 // ---------- Gist state ----------
 async function loadState() {
-  if (!GIST_ID) return { seen:new Set() };
+  if (!GIST_ID) return { seen:new Set(), seenLinks:new Set() };
   const r = await fetch(`${GITHUB_API}/gists/${GIST_ID}`, FETCH_OPTS);
   if (!r.ok) throw new Error(`Gist GET failed: ${r.status} ${r.statusText}`);
   const data = await r.json();
   const file = data.files?.[STATE_FILENAME]?.content;
-  return { seen: new Set(file ? JSON.parse(file).seen || [] : []) };
+  if (!file) return { seen:new Set(), seenLinks:new Set() };
+  const parsed = JSON.parse(file);
+  return {
+    seen: new Set(parsed.seen || []),
+    seenLinks: new Set(parsed.seen_links || [])
+  };
 }
 async function saveState(state) {
-  const files = { [STATE_FILENAME]: { content: JSON.stringify({ seen:[...state.seen].sort() }, null, 2) } };
+  const files = { [STATE_FILENAME]: { content: JSON.stringify({
+    seen: [...state.seen].sort(),
+    seen_links: [...state.seenLinks].sort()
+  }, null, 2) } };
   if (GIST_ID) {
     const r = await fetch(`${GITHUB_API}/gists/${GIST_ID}`, { method:"PATCH", ...FETCH_OPTS, body: JSON.stringify({ files }) });
     if (!r.ok) throw new Error(`Gist PATCH failed: ${r.status} ${r.statusText}`);
@@ -199,7 +209,10 @@ async function main() {
 
       for (const e of [...items].reverse()) {
         const id = canonicalId(e);
-        if (state.seen.has(id)) continue;
+        const nurl = normalizeUrl(e.link || "");
+
+        // ID- vagy LINK-alapú deduplikáció
+        if (state.seen.has(id) || (nurl && state.seenLinks.has(nurl))) continue;
 
         // kulcsszűrés
         const textForWhy = normalizeForMatch([e.title||"", e.contentSnippet||e.summary||""].join(" "));
@@ -214,13 +227,13 @@ async function main() {
 
         try {
           if (image) {
-            // caption max 1024
-            const caption = trimTo(html, 1024);
+            const caption = trimTo(html, 1024); // Telegram caption limit
             await bot.sendPhoto(TELEGRAM_CHANNEL_ID, image, { caption, parse_mode: "HTML" });
           } else {
             await bot.sendMessage(TELEGRAM_CHANNEL_ID, html, { parse_mode: "HTML", disable_web_page_preview: false });
           }
           state.seen.add(id);
+          if (nurl) state.seenLinks.add(nurl);
           sent++;
           await sleep(SEND_DELAY_MS);
         } catch (err) {
