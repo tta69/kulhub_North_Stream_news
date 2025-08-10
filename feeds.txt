@@ -1,10 +1,3 @@
-https://news.google.com/rss/search?q=Trump
-https://news.google.com/rss/search?q=Putin
-https://news.google.com/rss/search?q=Putyin
-https://news.google.com/rss/search?q=Alaszka
-https://news.google.com/rss/search?q=Alaska
-https://news.google.com/rss/search?q=Zelensky
-https://news.google.com/rss/search?q=Zelenszkij
 http://feeds.bbci.co.uk/news/world/rss.xml
 http://rss.cnn.com/rss/edition_world.rss
 https://rss.nytimes.com/services/xml/rss/nyt/World.xml
