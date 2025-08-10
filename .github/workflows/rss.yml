@@ -1,7 +1,8 @@
 name: Telegram RSS (Node)
+
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/10 * * * *"    # 10 percenként (figyelj: csillag-per-10)
   workflow_dispatch: {}
 
 jobs:
@@ -19,14 +20,14 @@ jobs:
           node-version: "20"
 
       - name: Install deps
-        run: npm ci --omit=dev
+        run: npm install --omit=dev --no-audit --no-fund
 
       - name: Run RSS script
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
-          GIST_ID: ${{ secrets.GIST_ID }}
+          GIST_ID: ${{ secrets.GIST_ID }}   # üresen is ok az első futásnál
           MAX_ITEMS_PER_FEED: "10"
           SEND_DELAY_MS: "500"
         run: npm run rss:run
